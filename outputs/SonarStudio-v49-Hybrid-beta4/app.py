@@ -664,6 +664,8 @@ class Studio(QMainWindow):
         menu = self.menuBar().addMenu('Arquivo')
         for title, callback in [('Abrir .DAT…', self.choose_dat), ('Abrir mosaico…', self.choose_mosaic), ('Salvar projeto…', self.save_project), ('Exportar CSV…', self.export_csv)]:
             action = QAction(title, self); action.triggered.connect(callback); menu.addAction(action)
+        track_csv = menu.addAction('Exportar trilha B001 por posição GPS…')
+        track_csv.triggered.connect(self.export_position_track)
         from pro_dialog import Professional
         self.professional=Professional(self)
         screen=QApplication.primaryScreen()
@@ -1202,6 +1204,42 @@ class Studio(QMainWindow):
     def export_sonar(self):
         from viewer_screen_export import export_visible
         export_visible(self)
+
+    def export_position_track(self):
+        from humminbird_track import export_track
+        from recording import source_files
+
+        if self.recording is None:
+            QMessageBox.information(self, 'Exportar trilha', 'Abra uma gravação Humminbird primeiro.')
+            return
+        try:
+            dat, channels = source_files(self.recording.dat)
+        except (OSError, ValueError) as error:
+            self.notify_error(str(error))
+            return
+        beam = next((path for path in channels if path.stem.casefold() == 'b001'), None)
+        if beam is None:
+            QMessageBox.information(self, 'Exportar trilha', 'A gravação não contém o canal B001.SON.')
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Exportar trilha B001',
+            str(ROOT / 'outputs' / f'{dat.stem}-trilha-B001.csv'), 'CSV (*.csv)',
+        )
+        if not path:
+            return
+
+        def work(note, progress, cancelled):
+            try:
+                return export_track(beam, path, cancelled=cancelled)
+            except InterruptedError:
+                note('Exportação da trilha cancelada.')
+                return None
+
+        def finished(rows):
+            if rows is not None:
+                self.log.appendPlainText(f'Trilha B001 salva: {rows:,} pontos em {path}')
+
+        self.run_job(work, finished)
 
     def export_map_area(self):
         d = self.map.dataset

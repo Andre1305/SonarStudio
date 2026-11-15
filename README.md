@@ -53,6 +53,7 @@ Parser NMEA 0183, sincronização temporal, filtro de mediana, IDW, Marching Squ
 
 ## Créditos e licenças
 
+- [Exportador Humminbird por posição GPS](outputs/SonarStudio-v49-Hybrid-beta4/humminbird_track.py), [MIT](outputs/SonarStudio-v49-Hybrid-beta4/humminbird_track.LICENSE.txt). A licença cobre esse módulo.
 - [PINGMapper](https://github.com/CameronBodine/PINGMapper), versão fonte fixada no runtime, MIT.
 - [GhostVision](https://huggingface.co/PINGEcosystem/gv-yolo12), CC-BY-SA-4.0; proveniência e hash em cada snapshot.
 - [SonarVision](https://huggingface.co/Dinoman1221/sonarvision-yolov8-esi-v6), Apache-2.0 declarado pelo autor; revision e hashes preservados.
@@ -63,3 +64,15 @@ Parser NMEA 0183, sincronização temporal, filtro de mediana, IDW, Marching Squ
 Numba/LLVM CPU com fallback legado; GPU experimental para cores; janela de leitura limitada; waypoint GPS/estimado e GPX; captura dos canais visíveis com legenda opcional; DownScan vertical ao lado do SideScan; escala de análise preserva zoom durante navegação e redimensionamento. 142 testes locais aprovados; o CI não recebe gravações privadas.
 
 Atalhos: C marcador; Ctrl+W waypoint do barco; Ctrl+Shift+W alvo SideScan; Ctrl+roda zoom; Shift+roda escala vertical. SonarStudio-Legado.exe força modo legado.
+
+### Exportar trilha B001 por posição GPS
+
+Na versão de desenvolvimento, abra uma gravação Humminbird e escolha **Arquivo → Exportar trilha B001 por posição GPS**. A opção gera um CSV com latitude, longitude e profundidade em metros. Mantém o primeiro ping de cada sequência de coordenadas iguais e preserva profundidades zero. Serve para intercâmbio de trilhas. A exportação existente de sondagens continua disponível para o fluxo de batimetria.
+
+O exportador também funciona com apenas Python, sem as dependências gráficas do SonarStudio.
+
+```powershell
+python outputs/SonarStudio-v49-Hybrid-beta4/humminbird_track.py R00050/B001.SON R00050-trilha.csv
+```
+
+A regra foi reproduzida a partir da gravação R00050 e da exportação observada no ReefMaster 2.2.57.0. Para esse caso, os 5.332 pontos e as profundidades coincidiram na ordem, com desvio de posição de até 6,4 cm. A compatibilidade ainda precisa ser aferida em outros formatos de ping, dispositivos e opções de importação. A implementação foi feita a partir dos arquivos Humminbird e da comparação de saídas.
