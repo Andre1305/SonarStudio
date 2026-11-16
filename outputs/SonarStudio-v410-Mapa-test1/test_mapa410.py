@@ -69,5 +69,169 @@ class BathyStyleTests(unittest.TestCase):
         self.assertEqual(label_positions(np.array([[0, 0], [50, 0.]])), [])
 
 
+def solid_png(rgb=(255, 0, 0), size=256):
+    from rasterio.io import MemoryFile
+    data = np.zeros((3, size, size), np.uint8)
+    for i, v in enumerate(rgb):
+        data[i] = v
+    import warnings
+    warnings.simplefilter('ignore', UserWarning)
+    with MemoryFile() as memory:
+        with memory.open(driver='PNG', width=size, height=size, count=3, dtype='uint8') as ds:
+            ds.write(data)
+        return memory.read()
+
+
+class FakeFetch:
+    def __init__(self, payload=None, error=None):
+        self.payload = payload if payload is not None else solid_png()
+        self.error = error
+        self.calls = []
+
+    def __call__(self, url):
+        self.calls.append(url)
+        if self.error:
+            raise self.error
+        return self.payload
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1_000_000.
+
+    def __call__(self):
+        return self.now
+
+
+class BasemapTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from unittest.mock import patch
+        import basemap
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        guard = patch.object(basemap, 'http_fetch', side_effect=AssertionError('rede acessada no teste'))
+        guard.start()
+        self.addCleanup(guard.stop)
+
+    def cache(self, fetch, url=None, clock=None):
+        from pathlib import Path
+        from basemap import TileCache, DEFAULT_URL
+        return TileCache(Path(self.tmp.name), url or DEFAULT_URL, fetch=fetch, clock=clock or Clock())
+
+    def test_tile_math_known_values(self):
+        from basemap import lonlat_to_tile, tile_bounds_3857
+        self.assertEqual(tuple(int(v) for v in lonlat_to_tile(0, 0, 1)), (1, 1))
+        x, y = lonlat_to_tile(-46.6333, -23.5505, 10)
+        self.assertEqual((int(x), int(y)), (379, 580))
+        left, bottom, right, top = tile_bounds_3857(0, 0, 0)
+        self.assertAlmostEqual(right, 20037508.34, places=1)
+        self.assertAlmostEqual(bottom, -20037508.34, places=1)
+        self.assertAlmostEqual(left, -right, places=3)
+
+    def test_latitude_clamped(self):
+        from basemap import lonlat_to_tile, MAX_LAT
+        self.assertEqual(lonlat_to_tile(0, 89.9, 3), lonlat_to_tile(0, MAX_LAT, 3))
+        self.assertEqual(lonlat_to_tile(0, -90, 3), lonlat_to_tile(0, -MAX_LAT, 3))
+
+    def test_zoom_for_resolution(self):
+        from basemap import zoom_for_resolution
+        self.assertEqual(zoom_for_resolution(1., 0), 18)
+        self.assertEqual(zoom_for_resolution(.01, 0), 19)
+        self.assertEqual(zoom_for_resolution(1e6, 0), 0)
+        self.assertEqual(zoom_for_resolution(.01, 0, max_zoom=17), 17)
+
+    def test_config_rejects_bad_url(self):
+        from basemap import BasemapConfig
+        for url in ['http://a/{z}/{x}/{y}.png', 'https://a/{z}/{x}.png', 'ftp://{z}{x}{y}']:
+            with self.assertRaises(ValueError):
+                BasemapConfig(url=url).validate()
+        with self.assertRaises(ValueError):
+            BasemapConfig(max_zoom=30).validate()
+        BasemapConfig().validate()
+        self.assertFalse(BasemapConfig().enabled)
+        restored = BasemapConfig.from_state({'max_zoom': 17, 'x': 1})
+        self.assertEqual(restored.max_zoom, 17)
+        self.assertEqual(BasemapConfig.from_state(BasemapConfig(enabled=True).state()).enabled, True)
+
+    def test_cache_hit_expiry_and_url_isolation(self):
+        fetch, clock = FakeFetch(), Clock()
+        cache = self.cache(fetch, clock=clock)
+        tile = cache.get(3, 2, 1)
+        self.assertEqual(tile.shape, (256, 256, 4))
+        self.assertEqual(tuple(tile[0, 0]), (255, 0, 0, 255))
+        cache.get(3, 2, 1)
+        self.assertEqual(len(fetch.calls), 1)
+        self.assertIn('/3/2/1', fetch.calls[0])
+        clock.now += 8 * 86400
+        cache.get(3, 2, 1)
+        self.assertEqual(len(fetch.calls), 2)
+        other = FakeFetch()
+        self.cache(other, url='https://example.org/{z}/{x}/{y}.png').get(3, 2, 1)
+        self.assertEqual(len(other.calls), 1)
+
+    def test_fetch_failure_returns_none_and_backs_off(self):
+        fetch, clock = FakeFetch(error=OSError('offline')), Clock()
+        cache = self.cache(fetch, clock=clock)
+        self.assertIsNone(cache.get(1, 0, 0))
+        self.assertIsNone(cache.get(1, 0, 0))
+        self.assertEqual(len(fetch.calls), 1)
+        clock.now += 61
+        cache.get(1, 0, 0)
+        self.assertEqual(len(fetch.calls), 2)
+
+    def test_corrupt_cached_tile_refetched(self):
+        fetch = FakeFetch()
+        cache = self.cache(fetch)
+        path = cache.tile_path(2, 1, 1)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'lixo')
+        tile = cache.get(2, 1, 1)
+        self.assertEqual(len(fetch.calls), 1)
+        self.assertEqual(tile.shape, (256, 256, 4))
+        bad = self.cache(FakeFetch(payload=b'nao e imagem'))
+        self.assertIsNone(bad.get(2, 0, 0))
+
+    def test_cache_root_fallback(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from basemap import cache_root
+        blocker = Path(self.tmp.name) / 'arquivo'
+        blocker.write_text('x')
+        home = Path(self.tmp.name) / 'home'
+        with patch('pathlib.Path.home', return_value=home):
+            root = cache_root({'LOCALAPPDATA': str(blocker)})
+        self.assertTrue(str(root).startswith(str(home)))
+        good = cache_root({'LOCALAPPDATA': str(Path(self.tmp.name) / 'local')})
+        self.assertEqual(good, Path(self.tmp.name) / 'local' / 'SonarStudio' / 'tiles')
+
+    def test_tile_count_capped_by_lowering_zoom(self):
+        from rasterio.crs import CRS
+        from basemap import tiles_for_view, MAX_TILES_PER_VIEW
+        crs = CRS.from_epsg(31983)
+        bounds = (300000., 7380000., 350000., 7430000.)
+        z, tiles = tiles_for_view(bounds, crs, .1, 19)
+        self.assertLessEqual(len(tiles), MAX_TILES_PER_VIEW)
+        self.assertGreater(len(tiles), 0)
+        self.assertLess(z, 19)
+
+    def test_render_view_reprojects_solid_tiles(self):
+        from rasterio.crs import CRS
+        from basemap import render_view
+        cache = self.cache(FakeFetch())
+        bounds = (330000., 7394000., 330400., 7394200.)
+        image = render_view(cache, bounds, CRS.from_epsg(31983), 200, 100, 2., 19)
+        self.assertEqual(image.shape, (100, 200, 4))
+        self.assertEqual(tuple(image[50, 100]), (255, 0, 0, 255))
+
+    def test_render_view_none_when_all_fail(self):
+        from rasterio.crs import CRS
+        from basemap import render_view
+        cache = self.cache(FakeFetch(error=OSError('offline')))
+        self.assertIsNone(render_view(cache, (330000., 7394000., 330400., 7394200.), CRS.from_epsg(31983), 200, 100, 2., 19))
+        ok = self.cache(FakeFetch())
+        self.assertIsNone(render_view(ok, (330000., 7394000., 330400., 7394200.), CRS.from_epsg(31983), 200, 100, 2., 19, cancel=lambda: True))
+
+
 if __name__ == '__main__':
     unittest.main()
