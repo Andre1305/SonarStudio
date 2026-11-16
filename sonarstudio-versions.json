@@ -1,5 +1,5 @@
 {
-  "latest": "4.9-Hybrid-beta.4",
+  "latest": "4.10-Mapa-test.1",
   "versions": [
     {
       "version": "4.0-test.1",
@@ -69,6 +69,12 @@
       "folder": "outputs/SonarStudio-v49-Hybrid-beta4",
       "tag": "sonarstudio-v4.9-Hybrid-beta.4",
       "notes_file": "docs/releases/4.9-Hybrid-beta.4.md"
+    },
+    {
+      "version": "4.10-Mapa-test.1",
+      "folder": "outputs/SonarStudio-v410-Mapa-test1",
+      "tag": "sonarstudio-v4.10-Mapa-test.1",
+      "notes_file": "docs/releases/4.10-Mapa-test.1.md"
     }
   ]
 }

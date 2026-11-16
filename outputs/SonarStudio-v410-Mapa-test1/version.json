@@ -1,0 +1,19 @@
+{
+  "version": "4.10-Mapa-test.1",
+  "created_utc": "2026-11-16T23:22:13.258686+00:00",
+  "test_count": 142,
+  "focused_tests_subset": 14,
+  "runtime": "Installed via Instalar-SonarStudio.ps1; shared Python runtime",
+  "standalone": false,
+  "processing": "Python GUI plus Numba/LLVM nopython kernels, nogil, no fastmath; legacy fallback; not a C++ or Rust DLL",
+  "gpu": "experimental pointwise OpenGL with framebuffer readback; RTX 3050 validated; freeze/export retain original CPU ordering",
+  "memory": "readonly mmap sample views; assembled windows require copies; 64MiB block cache; 128MiB raw window limit",
+  "ai": "existing sonar-specific four-class model unchanged; classification accuracy not certified",
+  "screen_export": "displayed sonar viewports combined; optional selected-ping vessel GPS/depth/speed overlay; DownScan vertical panel beside SideScan; analysis scale retains zoom on navigation and resize; separate native capture retained",
+  "waypoints": "Ctrl+W vessel GPS; Ctrl+Shift+W click SideScan estimated target; local findings with PNG and GPX export; C toggles synchronized cursor",
+  "safe_mode": "SonarStudio-Legado.exe or --legacy disables JIT/GPU regardless of saved project",
+  "private_documents_included": false,
+  "user_recordings_or_keys_included": false,
+  "basemap": "XYZ tiles opt-in (OSM default), disk cache 7 days, max 2 concurrent / 64 per view; no bulk prefetch",
+  "bathymetry_style": "hillshade, banded palette, opacity, display-only Chaikin contours with along-line labels; grid unchanged"
+}
