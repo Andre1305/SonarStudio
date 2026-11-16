@@ -1,8 +1,8 @@
 {
   "version": "4.10-Mapa-test.1",
   "created_utc": "2026-11-16T23:22:13.258686+00:00",
-  "test_count": 142,
-  "focused_tests_subset": 14,
+  "test_count": 164,
+  "focused_tests_subset": 22,
   "runtime": "Installed via Instalar-SonarStudio.ps1; shared Python runtime",
   "standalone": false,
   "processing": "Python GUI plus Numba/LLVM nopython kernels, nogil, no fastmath; legacy fallback; not a C++ or Rust DLL",

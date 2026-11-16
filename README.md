@@ -1,6 +1,6 @@
 # SonarStudio
 
-SonarStudio **4.9-Hybrid-beta.4**: aplicativo Windows para arquivos Humminbird DAT/SON, Sonar Viewer, mosaicos SideScan, batimetria TIN e triagem local por modelos específicos de sonar.
+SonarStudio **4.10-Mapa-test.1**: aplicativo Windows para arquivos Humminbird DAT/SON, Sonar Viewer, mosaicos SideScan, batimetria TIN e triagem local por modelos específicos de sonar.
 
 **[Baixar versões de teste](https://github.com/Andre1305/SonarStudio/releases)** · [Guia do SonarStudio](docs/SONARSTUDIO.md)
 
@@ -9,7 +9,7 @@ SonarStudio **4.9-Hybrid-beta.4**: aplicativo Windows para arquivos Humminbird D
 1. Baixe o ZIP da versão nas Releases e extraia mantendo a estrutura de pastas.
 2. Instale [Pixi](https://pixi.sh) pelo site oficial ou `winget install prefix-dev.pixi`.
 3. Execute `./Instalar-SonarStudio.ps1` no PowerShell. Precisa de internet para instalar as dependências. Para uma versão antiga: `./Instalar-SonarStudio.ps1 -Version 4.1-test.1`.
-4. Abra `outputs/SonarStudio-v49-Hybrid-beta4/SonarStudio.exe` (ou a pasta correspondente à versão escolhida).
+4. Abra `outputs/SonarStudio-v410-Mapa-test1/SonarStudio.exe` (ou a pasta correspondente à versão escolhida).
 
 O ZIP contém modelos e launcher, mas **não contém Python/GDAL instalados**. O script cria o runtime esperado em `work/PINGMapper-main/.pixi/envs/default`. O instalador foi acrescentado para distribuição e requer validação de instalação limpa; o runtime local anterior já foi usado nos testes de integração.
 
@@ -57,6 +57,11 @@ Parser NMEA 0183, sincronização temporal, filtro de mediana, IDW, Marching Squ
 - [GhostVision](https://huggingface.co/PINGEcosystem/gv-yolo12), CC-BY-SA-4.0; proveniência e hash em cada snapshot.
 - [SonarVision](https://huggingface.co/Dinoman1221/sonarvision-yolov8-esi-v6), Apache-2.0 declarado pelo autor; revision e hashes preservados.
 - Noto Sans: SIL Open Font License, arquivo OFL incluído.
+- Mapa de fundo padrão: dados © colaboradores do OpenStreetMap (ODbL); tiles sujeitos à política de uso do OSM.
+
+## 4.10-Mapa-test.1
+
+Mapa de fundo opcional (OpenStreetMap ou outra fonte XYZ, desligado por padrão, com aviso de privacidade e cache local) e novo visual da batimetria: relevo sombreado, faixas de cor, opacidade, isóbatas suavizadas com rótulos e legenda. A grade e os arquivos exportados não mudam. [Notas](docs/releases/4.10-Mapa-test.1.md).
 
 ## Beta 4.9
 
