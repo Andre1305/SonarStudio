@@ -233,5 +233,134 @@ class BasemapTests(unittest.TestCase):
         self.assertIsNone(render_view(ok, (330000., 7394000., 330400., 7394200.), CRS.from_epsg(31983), 200, 100, 2., 19, cancel=lambda: True))
 
 
+class StubLoader:
+    def __init__(self):
+        self.requests = []
+
+    def request(self, *args):
+        self.requests.append(args)
+
+    def shutdown(self):
+        pass
+
+
+class MapIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.qt = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import tempfile
+        from unittest.mock import patch
+        import basemap
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        guard = patch.object(basemap, 'http_fetch', side_effect=AssertionError('rede acessada no teste'))
+        guard.start()
+        self.addCleanup(guard.stop)
+
+    def depth_tif(self):
+        import rasterio
+        from rasterio.transform import from_origin
+        from pathlib import Path
+        path = Path(self.tmp.name) / 'prof.tif'
+        data = np.tile(np.linspace(2, 12, 200, dtype='float32'), (100, 1))
+        with rasterio.open(path, 'w', driver='GTiff', width=200, height=100, count=1, dtype='float32', crs='EPSG:31983',
+                           transform=from_origin(330000, 7394200, 2, 2), nodata=-9999.) as ds:
+            ds.write(data, 1)
+        return path
+
+    def mapview(self):
+        from app import MapView
+        view = MapView()
+        view.resize(200, 100)
+        view.loader = StubLoader()
+        self.addCleanup(lambda: view.dataset and view.dataset.close())
+        return view
+
+    def pixel(self, image, x, y):
+        color = image.pixelColor(x, y)
+        return color.red(), color.green(), color.blue()
+
+    def test_loader_drops_stale_results(self):
+        import time
+        from rasterio.crs import CRS
+        from basemap import BasemapConfig
+        from basemap_worker import BasemapLoader
+        red = np.zeros((256, 256, 4), np.uint8)
+        red[..., 0] = red[..., 3] = 255
+
+        class SlowCache:
+            def get(self, z, x, y):
+                time.sleep(.05)
+                return red
+
+        loader = BasemapLoader(lambda url: SlowCache())
+        self.addCleanup(loader.shutdown)
+        got = []
+        loader.ready.connect(lambda key, image: got.append(key))
+        crs, config = CRS.from_epsg(31983), BasemapConfig(enabled=True)
+        bounds = (330000., 7394000., 330400., 7394200.)
+        loader.request('k1', bounds, crs, 200, 100, 2., config)
+        loader.request('k2', bounds, crs, 200, 100, 2., config)
+        deadline = time.time() + 5
+        while not got and time.time() < deadline:
+            self.qt.processEvents()
+            time.sleep(.01)
+        time.sleep(.3)
+        self.qt.processEvents()
+        self.assertEqual(got, ['k2'])
+
+    def test_mapview_draws_basemap_under_bathymetry(self):
+        from PySide6.QtGui import QImage, QColor
+        view = self.mapview()
+        view.depth_palette = 'Blues'
+        view.relief_visible = False
+        view.open_raster(str(self.depth_tif()))
+        view.render_raster()
+        size = (view.width(), view.height())
+        cx, cy = size[0] // 2, size[1] // 2
+        alone = self.pixel(view.grab().toImage(), cx, cy)
+        view.basemap_config.enabled = True
+        red = QImage(*size, QImage.Format.Format_RGBA8888)
+        red.fill(QColor(255, 0, 0))
+        view.on_basemap(view.basemap_view_key(), red)
+        view.layer_opacity = .5
+        view.render_raster()
+        image = view.grab().toImage()
+        mixed = self.pixel(image, cx, cy)
+        expected = (.5 * alone[0] + 127.5, .5 * alone[1], .5 * alone[2])
+        for got, want in zip(mixed, expected):
+            self.assertAlmostEqual(got, want, delta=6)
+        self.assertEqual(self.pixel(image, 2, cy), (255, 0, 0))
+
+    def test_basemap_off_by_default_no_request(self):
+        view = self.mapview()
+        self.assertFalse(view.basemap_config.enabled)
+        view.open_raster(str(self.depth_tif()))
+        view.render_raster()
+        self.assertEqual(view.loader.requests, [])
+        view.basemap_config.enabled = True
+        view.render_raster()
+        self.assertEqual(len(view.loader.requests), 1)
+        view.render_raster()
+        self.assertEqual(len(view.loader.requests), 1)
+
+    def test_contours_loaded_smoothed(self):
+        view = self.mapview()
+        line = np.array([[330000., 7394000.], [330200., 7394000.], [330200., 7394200.]])
+        view.set_contours([(5., line)])
+        depth, points = view.contours[0]
+        self.assertEqual(depth, 5.)
+        self.assertGreater(len(points), len(line))
+        np.testing.assert_array_equal(points[0], line[0])
+        np.testing.assert_array_equal(points[-1], line[-1])
+        view.open_raster(str(self.depth_tif()))
+        view.contours_visible = True
+        view.contour_interval = 1.
+        self.assertFalse(view.grab().toImage().isNull())
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -24,12 +24,12 @@ import skimage.io
 import rasterio
 from rasterio.windows import Window
 from rasterio.enums import Resampling
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QRectF, QPointF
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QRectF, QPointF, QSettings
 from PySide6.QtGui import QColor, QPainter, QPen, QImage, QPixmap, QPainterPath, QAction, QFontDatabase, QFont, QTransform
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QFileDialog, QSplitter, QComboBox, QCheckBox, QSlider,
     QDoubleSpinBox, QProgressBar, QPlainTextEdit, QMessageBox, QGroupBox,
-    QGraphicsView, QGraphicsScene, QFormLayout, QFrame,QStyle,QScrollArea,QGraphicsItem)
+    QGraphicsView, QGraphicsScene, QFormLayout, QFrame,QStyle,QScrollArea,QGraphicsItem,QInputDialog)
 
 from recording import ROOT, Recording, import_recording, prepare_mapping, cache_project
 from image_processing import ImageSettings, enhance, colorize, PALETTES
@@ -112,6 +112,16 @@ class MapView(QWidget):
         self.depth_fixed_range=None
         self.contours=[]
         self.contours_visible=True
+        from basemap import BasemapConfig
+        self.basemap_config=BasemapConfig()
+        self.basemap_image=None
+        self.basemap_key=None
+        self.basemap_pending=None
+        self.relief_visible=True
+        self.bands_visible=True
+        self.layer_opacity=.85
+        self.contour_interval=1.
+        self.loader=None
         self.objects={}
         self.heat_visible=False
         self.heat_cache_key=None
@@ -187,7 +197,56 @@ class MapView(QWidget):
         s = self.meters_per_pixel()
         return QPointF((xy[0]-self.center[0])/s + self.width()/2, (self.center[1]-xy[1])/s + self.height()/2)
 
+    def map_crs(self):
+        if self.dataset is not None:return self.dataset.crs
+        if self.recording is not None:return self.recording.crs
+        return None
+
+    def basemap_view_key(self):
+        crs=self.map_crs()
+        if crs is None:return None
+        a=self.screen_to_world(QPointF(0,0));b=self.screen_to_world(QPointF(self.width(),self.height()))
+        bounds=(round(float(a[0]),3),round(float(b[1]),3),round(float(b[0]),3),round(float(a[1]),3))
+        return (bounds,self.width(),self.height(),self.basemap_config.url,int(self.basemap_config.max_zoom),crs.to_string())
+
+    def ensure_loader(self):
+        if self.loader is None:
+            from basemap import TileCache,cache_root
+            from basemap_worker import BasemapLoader
+            root=cache_root();self.loader=BasemapLoader(lambda url:TileCache(root,url));self.loader.ready.connect(self.on_basemap)
+        return self.loader
+
+    def request_basemap(self):
+        if not self.basemap_config.enabled:return
+        key=self.basemap_view_key()
+        if key is None or key in (self.basemap_key,self.basemap_pending):return
+        self.basemap_pending=key
+        self.ensure_loader().request(key,key[0],self.map_crs(),self.width(),self.height(),self.meters_per_pixel(),self.basemap_config)
+
+    def on_basemap(self,key,image):
+        if not self.basemap_config.enabled or key not in (self.basemap_pending,self.basemap_view_key()):return
+        first=self.basemap_image is None
+        self.basemap_image=image;self.basemap_key=key
+        if key==self.basemap_pending:self.basemap_pending=None
+        if first:self.render_raster()
+        else:self.update()
+
+    def set_basemap_enabled(self,enabled):
+        self.basemap_config.enabled=bool(enabled)
+        if not enabled:self.basemap_image=None;self.basemap_key=None;self.basemap_pending=None
+        self.render_raster()
+
+    def set_contours(self,items):
+        from bathy_style import chaikin
+        self.contours=[(depth,chaikin(np.asarray(points,dtype=float))) for depth,points in items]
+        self.contour_cache_key=None;self.update()
+
+    def faded(self,rgba):
+        if self.basemap_image is None or not self.basemap_config.enabled:return rgba
+        rgba=np.array(rgba,copy=True);rgba[...,3]=np.round(rgba[...,3]*self.layer_opacity).astype(np.uint8);return rgba
+
     def render_raster(self):
+        self.request_basemap()
         if not self.dataset:
             self.image = None
             self.update()
@@ -212,15 +271,16 @@ class MapView(QWidget):
         self.update()
 
     def raster_image(self,data):
-        if data.ndim==3:return qimage_rgba(np.moveaxis(data,0,-1))
+        if data.ndim==3:return qimage_rgba(self.faded(np.moveaxis(data,0,-1)))
         valid=~np.ma.getmaskarray(data)
         if self.dataset.dtypes[0].startswith('float'):
-            lo,hi=self.depth_range;x=np.clip((data.filled(lo)-lo)/max(.01,hi-lo),0,1)
-            from matplotlib import colormaps
-            colors=(colormaps[self.depth_palette](x)*255).astype(np.uint8);colors[...,3]=valid.astype('uint8')*255
-            return qimage_rgba(colors)
+            from bathy_style import compose,hillshade
+            lo,hi=self.depth_range;depth=np.where(valid,np.ma.getdata(data).astype(float),np.nan)
+            shade=hillshade(depth,self.meters_per_pixel(),z_factor=3.) if self.relief_visible else None
+            opacity=self.layer_opacity if (self.basemap_image is not None and self.basemap_config.enabled) else 1.
+            return qimage_rgba(compose(depth,lo,max(hi,lo+.01),self.depth_palette,interval=self.contour_interval if self.bands_visible else None,shade=shade,opacity=opacity))
         options=replace(self.processing,gamma=self.gamma,palette=self.palette) if self.processing else None
-        return rgba_image(data.filled(0),valid,self.gamma,self.palette,options)
+        return qimage_rgba(self.faded(colorize(data.filled(0),options or ImageSettings(gamma=self.gamma,palette=self.palette),valid)))
 
     def resizeEvent(self, event):
         self.refresh()
@@ -228,6 +288,12 @@ class MapView(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor('#142331'))
+        basemap_drawn=False
+        crs=self.map_crs()
+        if self.basemap_config.enabled and self.basemap_image is not None and self.basemap_key and crs is not None and self.basemap_key[-1]==crs.to_string():
+            left,bottom,right,top=self.basemap_key[0]
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.drawImage(QRectF(self.world_to_screen((left,top)),self.world_to_screen((right,bottom))),self.basemap_image);basemap_drawn=True
         if self.image:
             p.drawImage(self.rect(), self.image)
         if self.heat_visible and self.recording and (not self.dataset or self.dataset.crs==self.recording.crs):
@@ -243,24 +309,30 @@ class MapView(QWidget):
             p.drawImage(self.rect(),self.heat_image)
             p.setPen(QColor('#ffe18b'));p.drawText(QPointF(20,self.height()-55),'Calor IA: score 0–1, não probabilidade; sem cor ≠ ausência')
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self.contours_visible:
-            key=(id(self.contours),tuple(self.center),self.span,self.width(),self.height())
+        if self.contours_visible and self.contours:
+            key=(id(self.contours),tuple(self.center),self.span,self.width(),self.height(),self.contour_interval)
             if getattr(self,'contour_cache_key',None)!=key:
-                self.contour_cache=[]
+                from bathy_style import label_positions
+                self.contour_cache=[];scale=self.meters_per_pixel();step=5*max(float(self.contour_interval),1e-9)
                 for depth,points in self.contours:
-                    path=QPainterPath()
-                    for i,point in enumerate(points):
-                        screen=self.world_to_screen(point)
-                        path.moveTo(screen) if i==0 else path.lineTo(screen)
-                    self.contour_cache.append((depth,path,path.pointAtPercent(.5)))
+                    if len(points)<2:continue
+                    screen=np.c_[(points[:,0]-self.center[0])/scale+self.width()/2,(self.center[1]-points[:,1])/scale+self.height()/2]
+                    path=QPainterPath();path.moveTo(*screen[0])
+                    for x,y in screen[1:]:path.lineTo(x,y)
+                    major=abs(depth/step-round(depth/step))<1e-6
+                    self.contour_cache.append((depth,path,major,label_positions(screen) if major else []))
                 self.contour_cache_key=key
-            occupied=set()
-            for depth,path,mid in self.contour_cache:
-                major=abs(depth/5-round(depth/5))<1e-6;p.setPen(QPen(QColor('#e5f0c9'),1.3 if major else .6))
-                p.drawPath(path)
-                cell=(int(mid.x()//85),int(mid.y()//30))
-                if major and self.rect().contains(mid.toPoint()) and cell not in occupied:
-                    p.drawText(mid,f'{depth:g} m');occupied.add(cell)
+            for depth,path,major,labels in self.contour_cache:
+                p.setPen(QPen(QColor('#e5f0c9'),1.4 if major else .6));p.drawPath(path)
+            occupied=set();metrics=p.fontMetrics()
+            for depth,path,major,labels in self.contour_cache:
+                text=f'{depth:g} m';width=metrics.horizontalAdvance(text)
+                for x,y,angle in labels:
+                    cell=(int(x//85),int(y//30))
+                    if not self.rect().contains(int(x),int(y)) or cell in occupied:continue
+                    occupied.add(cell);glyphs=QPainterPath();glyphs.addText(-width/2,metrics.ascent()/2-1,p.font(),text)
+                    p.save();p.translate(x,y);p.rotate(angle)
+                    p.strokePath(glyphs,QPen(QColor('#0b1119'),3));p.fillPath(glyphs,QColor('#e5f0c9'));p.restore()
         if self.recording and self.track_visible:
             key=(id(self.recording),tuple(self.center),self.span,self.width(),self.height())
             if getattr(self,'track_cache_key',None)!=key:
@@ -304,11 +376,24 @@ class MapView(QWidget):
         if self.dataset and self.dataset.dtypes[0].startswith('float'):
             p.drawText(QPointF(20,24),'Profundidade (m) · positiva para baixo')
             from matplotlib import colormaps
-            ramp=(colormaps[self.depth_palette](np.linspace(0,1,160))*255).astype('uint8')[:,None,:]
+            from bathy_style import banded
+            lo,hi=self.depth_range;hi=max(hi,lo+.01);interval=float(self.contour_interval)
+            positions=banded(np.linspace(lo,hi,160),lo,hi,interval) if self.bands_visible else np.linspace(0,1,160)
+            ramp=(colormaps[self.depth_palette](positions)*255).astype('uint8')[:,None,:]
             p.drawImage(QRectF(self.width()-82,52,14,160),qimage_rgba(ramp))
-            p.drawText(QPointF(self.width()-65,64),f'{self.depth_range[0]:.1f}')
-            p.drawText(QPointF(self.width()-65,211),f'{self.depth_range[1]:.1f}')
+            if self.bands_visible and interval>0:
+                first=math.ceil(lo/interval-1e-9)*interval;count=int(math.floor((hi-first)/interval+1e-9))+1
+                step=interval*max(1,math.ceil(count/8))
+                for depth in np.arange(first,hi+1e-9,step):
+                    p.drawText(QPointF(self.width()-65,52+160*(depth-lo)/(hi-lo)+4),f'{depth:g}')
+            else:
+                p.drawText(QPointF(self.width()-65,64),f'{lo:.1f}')
+                p.drawText(QPointF(self.width()-65,211),f'{hi:.1f}')
             p.drawText(QPointF(self.width()-85,231),'Escala (m)')
+        if basemap_drawn and self.basemap_config.attribution:
+            text=self.basemap_config.attribution;metrics=p.fontMetrics();width=metrics.horizontalAdvance(text)
+            box=QRectF(self.width()-width-14,self.height()-metrics.height()-6,width+10,metrics.height()+4)
+            p.fillRect(box,QColor(11,17,25,170));p.setPen(QColor('#dbe8f2'));p.drawText(box,Qt.AlignmentFlag.AlignCenter,text)
         p.drawLine(QPointF(self.width()-35, 27), QPointF(self.width()-35, 12))
         p.drawLine(QPointF(self.width()-35, 12), QPointF(self.width()-39, 17))
         p.drawLine(QPointF(self.width()-35, 12), QPointF(self.width()-31, 17))
@@ -602,6 +687,11 @@ class Studio(QMainWindow):
         controls = QHBoxLayout()
         self.map_layer=QComboBox();self.map_layer.addItems(['Sidescan Mosaic','Batimetria']);self.map_layer.currentIndexChanged.connect(self.change_map_layer);controls.addWidget(self.map_layer)
         self.contour_toggle=QCheckBox('Isóbatas');self.contour_toggle.toggled.connect(self.toggle_contours);controls.addWidget(self.contour_toggle)
+        self.basemap_toggle=QCheckBox('Mapa de fundo');self.basemap_toggle.setToolTip('Baixa imagens do mapa da área visível; desligado por padrão');self.basemap_toggle.toggled.connect(self.toggle_basemap);controls.addWidget(self.basemap_toggle)
+        self.relief_toggle=QCheckBox('Relevo');self.relief_toggle.setChecked(True);self.relief_toggle.toggled.connect(self.toggle_relief);controls.addWidget(self.relief_toggle)
+        self.bands_toggle=QCheckBox('Faixas');self.bands_toggle.setChecked(True);self.bands_toggle.toggled.connect(self.toggle_bands);controls.addWidget(self.bands_toggle)
+        controls.addWidget(QLabel('Opacidade'));self.opacity_slider=QSlider(Qt.Orientation.Horizontal);self.opacity_slider.setRange(20,100);self.opacity_slider.setValue(85);self.opacity_slider.setMaximumWidth(90);self.opacity_slider.valueChanged.connect(self.set_layer_opacity);controls.addWidget(self.opacity_slider)
+        source=QPushButton('Fonte do mapa…');source.clicked.connect(self.choose_basemap_source);controls.addWidget(source)
         fit = QPushButton('Enquadrar'); fit.clicked.connect(lambda: self.map.fit()); controls.addWidget(fit)
         native = QPushButton('Zoom 1:1'); native.clicked.connect(lambda: self.map.native_zoom()); controls.addWidget(native)
         self.measure_button = QPushButton('Medir'); self.measure_button.setCheckable(True); self.measure_button.toggled.connect(self.toggle_measure); controls.addWidget(self.measure_button)
@@ -803,6 +893,7 @@ class Studio(QMainWindow):
             self.ai_mode.setCurrentIndex({'ghostvision':2,'sonarvision':2}.get(player.get('ai_model'),{0:0,1:2,2:0,3:2}.get(player.get('ai_mode',0),0)));self.ai_threshold.setValue(player.get('ai_threshold',.35));self.ai_quality.setCurrentIndex(player.get('ai_quality',0));self.ai_continuous.setChecked(player.get('ai_continuous',False))
             self.heat_toggle.setChecked(bool(saved.get('heatmap_visible',False)))
             self.object_review.learning.setChecked(bool(saved.get('save_learning_feedback',True)))
+            self.restore_map_style(saved.get('map_style'))
         self.temperature.setValue(recording.temperature)
 
     def set_index(self, index):
@@ -1111,19 +1202,77 @@ class Studio(QMainWindow):
     def toggle_contours(self,checked):
         self.map.contours_visible=checked;self.map.update()
 
+    def toggle_basemap(self,checked):
+        if checked and not self.map.basemap_config.enabled:
+            from urllib.parse import urlparse
+            host=urlparse(self.map.basemap_config.url).hostname or self.map.basemap_config.url
+            settings=QSettings('SonarStudio','SonarStudio');consent=f'basemap/consent/{host}'
+            if settings.value(consent)!='1':
+                answer=QMessageBox.question(self,'Mapa de fundo',f'O mapa de fundo baixa imagens de {host}. Cada pedido revela ao servidor a região visível do mapa. As imagens ficam em cache local por 7 dias. Deseja ativar?')
+                if answer!=QMessageBox.StandardButton.Yes:
+                    self.basemap_toggle.blockSignals(True);self.basemap_toggle.setChecked(False);self.basemap_toggle.blockSignals(False);return
+                settings.setValue(consent,'1')
+        self.map.set_basemap_enabled(checked)
+
+    def toggle_relief(self,checked):
+        self.map.relief_visible=checked;self.map.render_raster()
+
+    def toggle_bands(self,checked):
+        self.map.bands_visible=checked;self.map.render_raster()
+
+    def set_layer_opacity(self,value):
+        self.map.layer_opacity=value/100;self.map.refresh()
+
+    def choose_basemap_source(self):
+        from basemap import BasemapConfig
+        current=self.map.basemap_config
+        url,ok=QInputDialog.getText(self,'Fonte do mapa','URL dos tiles (https, com {z}, {x} e {y}):',text=current.url)
+        if not ok:return
+        zoom,ok=QInputDialog.getInt(self,'Fonte do mapa','Zoom máximo do servidor:',int(current.max_zoom),0,22)
+        if not ok:return
+        attribution,ok=QInputDialog.getText(self,'Fonte do mapa','Atribuição exigida pela fonte:',text=current.attribution)
+        if not ok:return
+        try:config=BasemapConfig(url=url.strip(),max_zoom=zoom,attribution=attribution.strip()).validate()
+        except ValueError as error:self.log.appendPlainText(f'Fonte do mapa recusada: {error}');return
+        enabled=self.basemap_toggle.isChecked()
+        self.basemap_toggle.setChecked(False);self.map.basemap_config=config;self.map.set_basemap_enabled(False)
+        if enabled:self.basemap_toggle.setChecked(True)
+        self.log.appendPlainText(f'Fonte do mapa: {config.url}')
+
+    def map_style_state(self):
+        return {'basemap':dict(self.map.basemap_config.state(),enabled=self.basemap_toggle.isChecked()),'relief':self.relief_toggle.isChecked(),'bands':self.bands_toggle.isChecked(),'opacity':self.opacity_slider.value()/100}
+
+    def restore_map_style(self,style):
+        from basemap import BasemapConfig
+        style=style or {}
+        try:config=BasemapConfig.from_state(style.get('basemap',{})).validate()
+        except (TypeError,ValueError):config=BasemapConfig()
+        wanted=config.enabled;config.enabled=False
+        self.basemap_toggle.setChecked(False);self.map.basemap_config=config;self.map.set_basemap_enabled(False)
+        self.relief_toggle.setChecked(bool(style.get('relief',True)));self.bands_toggle.setChecked(bool(style.get('bands',True)))
+        self.opacity_slider.setValue(int(round(100*float(style.get('opacity',.85)))))
+        if wanted:self.basemap_toggle.setChecked(True)
+
     def load_contours(self,path):
-        self.map.contours=[]
+        self.map.contours=[];self.map.contour_cache_key=None
+        settings=(self.bathy_result or {}).get('settings') or {}
+        try:self.map.contour_interval=float(settings.get('contour_interval',1.)) or 1.
+        except (TypeError,ValueError):self.map.contour_interval=1.
         if not path or not pathlib.Path(path).is_file():return
         from osgeo import ogr
         ogr.UseExceptions()
         ds=ogr.Open(str(path))
         if ds:
+            items=[]
             for feature in ds.GetLayer(0):
                 geom=feature.GetGeometryRef()
                 if geom and geom.GetPointCount()>1:
                     points=np.array(geom.GetPoints())[:,:2];stride=max(1,len(points)//400)
-                    self.map.contours.append((feature.GetField('depth_m'),points[::stride]))
+                    if stride>1 and not np.array_equal(points[::stride][-1],points[-1]):points=np.vstack([points[::stride],points[-1:]])
+                    else:points=points[::stride]
+                    items.append((feature.GetField('depth_m'),points))
             ds=None
+            self.map.set_contours(items)
         self.map.update()
 
     def toggle_track(self, checked):
@@ -1241,6 +1390,7 @@ class Studio(QMainWindow):
             data['viewer']=self.viewer_controller.state();data['humviewer']=self.humviewer.state()
             data['player']={'speed':self.speed.currentData(),'cascade_direction':self.cascade_direction.currentIndex(),'ai_mode':self.ai_mode.currentIndex(),'ai_model':['off','ghostvision','sonarvision'][self.ai_mode.currentIndex()],'ai_threshold':self.ai_threshold.value(),'ai_quality':self.ai_quality.currentIndex(),'ai_continuous':self.ai_continuous.isChecked()}
             data['heatmap_visible']=self.heat_toggle.isChecked();data['save_learning_feedback']=self.object_review.learning.isChecked()
+            data['map_style']=self.map_style_state()
             pathlib.Path(path).write_text(json.dumps(data, indent=2), encoding='utf-8'); self.log.appendPlainText(f'Projeto salvo: {path}')
 
     def open_project(self):
@@ -1277,6 +1427,8 @@ class Studio(QMainWindow):
             self.recording.close()
         if self.map.dataset:
             self.map.dataset.close()
+        if self.map.loader:
+            self.map.loader.shutdown()
         event.accept()
 
 
