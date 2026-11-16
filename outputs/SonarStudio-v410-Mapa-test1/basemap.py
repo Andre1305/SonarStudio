@@ -108,12 +108,20 @@ def decode_tile(payload):
     """Bytes PNG/JPEG → RGBA uint8 (H, W, 4), ou None se não for imagem."""
     from rasterio.io import MemoryFile
     from rasterio.errors import RasterioError
+    from rasterio.enums import ColorInterp
     import warnings
     try:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             with MemoryFile(payload) as memory, memory.open() as ds:
                 data = ds.read()
+                palette = None
+                if ds.count == 1 and ds.colorinterp[0] == ColorInterp.palette:
+                    palette = np.zeros((256, 4), np.uint8)
+                    for index, color in ds.colormap(1).items():
+                        palette[index] = (tuple(color) + (255,))[:4] if len(color) == 3 else color
+        if palette is not None and data.dtype == np.uint8:
+            return np.ascontiguousarray(palette[data[0]])
     except (RasterioError, ValueError, OSError):
         return None
     if data.dtype != np.uint8 or data.ndim != 3:
@@ -150,16 +158,18 @@ class TileCache:
         key = (z, x, y)
         path = self.tile_path(z, x, y)
         now = self.clock()
+        stale = None
         try:
-            if path.is_file() and now - path.stat().st_mtime <= self.max_age:
+            if path.is_file():
                 tile = decode_tile(path.read_bytes())
-                if tile is not None:
+                if tile is not None and now - path.stat().st_mtime <= self.max_age:
                     return tile
+                stale = tile
         except OSError:
             pass
         with self.lock:
             if self.failures.get(key, 0) > now:
-                return None
+                return stale
         try:
             payload = self._download(z, x, y)
             tile = decode_tile(payload)
@@ -168,7 +178,7 @@ class TileCache:
         except Exception:
             with self.lock:
                 self.failures[key] = now + FAIL_BACKOFF_S
-            return None
+            return stale
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             temporary = path.with_suffix('.tmp')

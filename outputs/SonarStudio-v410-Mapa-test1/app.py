@@ -225,25 +225,21 @@ class MapView(QWidget):
 
     def on_basemap(self,key,image):
         if not self.basemap_config.enabled or key not in (self.basemap_pending,self.basemap_view_key()):return
-        first=self.basemap_image is None
         self.basemap_image=image;self.basemap_key=key
         if key==self.basemap_pending:self.basemap_pending=None
-        if first:self.render_raster()
-        else:self.update()
+        self.update()
 
     def set_basemap_enabled(self,enabled):
         self.basemap_config.enabled=bool(enabled)
-        if not enabled:self.basemap_image=None;self.basemap_key=None;self.basemap_pending=None
+        if not enabled:
+            self.basemap_image=None;self.basemap_key=None;self.basemap_pending=None
+            if self.loader is not None:self.loader.cancel()
         self.render_raster()
 
     def set_contours(self,items):
         from bathy_style import chaikin
         self.contours=[(depth,chaikin(np.asarray(points,dtype=float))) for depth,points in items]
         self.contour_cache_key=None;self.update()
-
-    def faded(self,rgba):
-        if self.basemap_image is None or not self.basemap_config.enabled:return rgba
-        rgba=np.array(rgba,copy=True);rgba[...,3]=np.round(rgba[...,3]*self.layer_opacity).astype(np.uint8);return rgba
 
     def render_raster(self):
         self.request_basemap()
@@ -271,16 +267,15 @@ class MapView(QWidget):
         self.update()
 
     def raster_image(self,data):
-        if data.ndim==3:return qimage_rgba(self.faded(np.moveaxis(data,0,-1)))
+        if data.ndim==3:return qimage_rgba(np.moveaxis(data,0,-1))
         valid=~np.ma.getmaskarray(data)
         if self.dataset.dtypes[0].startswith('float'):
             from bathy_style import compose,hillshade
             lo,hi=self.depth_range;depth=np.where(valid,np.ma.getdata(data).astype(float),np.nan)
             shade=hillshade(depth,self.meters_per_pixel(),z_factor=3.) if self.relief_visible else None
-            opacity=self.layer_opacity if (self.basemap_image is not None and self.basemap_config.enabled) else 1.
-            return qimage_rgba(compose(depth,lo,max(hi,lo+.01),self.depth_palette,interval=self.contour_interval if self.bands_visible else None,shade=shade,opacity=opacity))
+            return qimage_rgba(compose(depth,lo,max(hi,lo+.01),self.depth_palette,interval=self.contour_interval if self.bands_visible else None,shade=shade))
         options=replace(self.processing,gamma=self.gamma,palette=self.palette) if self.processing else None
-        return qimage_rgba(self.faded(colorize(data.filled(0),options or ImageSettings(gamma=self.gamma,palette=self.palette),valid)))
+        return qimage_rgba(colorize(data.filled(0),options or ImageSettings(gamma=self.gamma,palette=self.palette),valid))
 
     def resizeEvent(self, event):
         self.refresh()
@@ -295,7 +290,9 @@ class MapView(QWidget):
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             p.drawImage(QRectF(self.world_to_screen((left,top)),self.world_to_screen((right,bottom))),self.basemap_image);basemap_drawn=True
         if self.image:
+            if basemap_drawn:p.setOpacity(self.layer_opacity)
             p.drawImage(self.rect(), self.image)
+            p.setOpacity(1.)
         if self.heat_visible and self.recording and (not self.dataset or self.dataset.crs==self.recording.crs):
             key=(id(self.objects),tuple(self.center),self.span,self.width(),self.height())
             if self.heat_cache_key!=key:
@@ -1221,7 +1218,7 @@ class Studio(QMainWindow):
         self.map.bands_visible=checked;self.map.render_raster()
 
     def set_layer_opacity(self,value):
-        self.map.layer_opacity=value/100;self.map.refresh()
+        self.map.layer_opacity=value/100;self.map.update()
 
     def choose_basemap_source(self):
         from basemap import BasemapConfig

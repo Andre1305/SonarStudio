@@ -362,5 +362,123 @@ class MapIntegrationTests(unittest.TestCase):
         self.assertFalse(view.grab().toImage().isNull())
 
 
+class ReviewFixTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.qt = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import tempfile
+        from unittest.mock import patch
+        import basemap
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        guard = patch.object(basemap, 'http_fetch', side_effect=AssertionError('rede acessada no teste'))
+        guard.start()
+        self.addCleanup(guard.stop)
+
+    def test_paletted_png_decodes_to_palette_colors(self):
+        import warnings
+        from rasterio.io import MemoryFile
+        from basemap import decode_tile
+        data = np.zeros((1, 256, 256), np.uint8)
+        data[0, :, 128:] = 1
+        warnings.simplefilter('ignore', UserWarning)
+        with MemoryFile() as memory:
+            with memory.open(driver='PNG', width=256, height=256, count=1, dtype='uint8') as ds:
+                ds.write(data)
+                ds.write_colormap(1, {0: (200, 10, 10, 255), 1: (10, 200, 10, 0)})
+            payload = memory.read()
+        tile = decode_tile(payload)
+        self.assertEqual(tuple(tile[0, 0]), (200, 10, 10, 255))
+        self.assertEqual(tuple(tile[0, 200]), (10, 200, 10, 0))
+
+    def test_bands_align_with_isobaths_for_any_lo(self):
+        from bathy_style import banded
+        values = banded(np.array([1.9, 2.1, 2.9, 3.1]), 1.37, 10, 1.)
+        self.assertNotEqual(values[0], values[1])
+        self.assertEqual(values[1], values[2])
+        self.assertNotEqual(values[2], values[3])
+        self.assertTrue(((values >= 0) & (values <= 1)).all())
+
+    def test_expired_tile_served_when_offline(self):
+        from pathlib import Path
+        from basemap import TileCache, DEFAULT_URL
+        clock = Clock()
+        online = FakeFetch()
+        TileCache(Path(self.tmp.name), DEFAULT_URL, fetch=online, clock=clock).get(4, 1, 1)
+        clock.now += 8 * 86400
+        offline = FakeFetch(error=OSError('offline'))
+        tile = TileCache(Path(self.tmp.name), DEFAULT_URL, fetch=offline, clock=clock).get(4, 1, 1)
+        self.assertEqual(len(offline.calls), 1)
+        self.assertEqual(tuple(tile[0, 0]), (255, 0, 0, 255))
+
+    def test_disabling_cancels_running_job(self):
+        import time
+        from rasterio.crs import CRS
+        from basemap import BasemapConfig
+        from basemap_worker import BasemapLoader
+        calls = []
+        red = np.zeros((256, 256, 4), np.uint8)
+        red[..., 0] = red[..., 3] = 255
+
+        class SlowCache:
+            def get(self, z, x, y):
+                calls.append((z, x, y))
+                time.sleep(.05)
+                return red
+
+        loader = BasemapLoader(lambda url: SlowCache())
+        self.addCleanup(loader.shutdown)
+        got = []
+        loader.ready.connect(lambda key, image: got.append(key))
+        loader.request('k', (300000., 7380000., 310000., 7390000.), CRS.from_epsg(31983), 800, 800, 1., BasemapConfig(enabled=True))
+        time.sleep(.12)
+        loader.cancel()
+        seen = len(calls)
+        time.sleep(.3)
+        self.qt.processEvents()
+        self.assertLessEqual(len(calls), seen + 1)
+        self.assertEqual(got, [])
+
+    def test_mapview_disable_calls_loader_cancel(self):
+        from app import MapView
+        view = MapView()
+
+        class Loader(StubLoader):
+            cancelled = 0
+
+            def cancel(self):
+                self.cancelled += 1
+
+        view.loader = Loader()
+        view.basemap_config.enabled = True
+        view.set_basemap_enabled(False)
+        self.assertEqual(view.loader.cancelled, 1)
+
+    def test_opacity_applies_without_recompose(self):
+        from PySide6.QtGui import QImage, QColor
+        helper = MapIntegrationTests('test_mapview_draws_basemap_under_bathymetry')
+        helper.tmp = self.tmp
+        view = helper.mapview()
+        helper.addCleanup = self.addCleanup
+        view.depth_palette = 'Blues'
+        view.relief_visible = False
+        view.open_raster(str(helper.depth_tif()))
+        view.basemap_config.enabled = True
+        red = QImage(view.width(), view.height(), QImage.Format.Format_RGBA8888)
+        red.fill(QColor(255, 0, 0))
+        view.on_basemap(view.basemap_view_key(), red)
+        view.layer_opacity = .5
+        view.render_raster()
+        cx, cy = view.width() // 2, view.height() // 2
+        half = helper.pixel(view.grab().toImage(), cx, cy)
+        view.layer_opacity = .2
+        view.update()
+        faint = helper.pixel(view.grab().toImage(), cx, cy)
+        self.assertGreater(faint[0], half[0] + 20)
+
+
 if __name__ == '__main__':
     unittest.main()

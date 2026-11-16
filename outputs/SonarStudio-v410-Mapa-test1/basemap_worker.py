@@ -25,6 +25,11 @@ class BasemapLoader(QObject):
             self.pending = (key, tuple(bounds), crs, int(width), int(height), float(m_per_px), config)
             self.condition.notify()
 
+    def cancel(self):
+        with self.condition:
+            self.latest = None
+            self.pending = None
+
     def shutdown(self):
         with self.condition:
             self.stopped = True

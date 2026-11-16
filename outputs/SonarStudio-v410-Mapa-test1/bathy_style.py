@@ -34,13 +34,12 @@ def hillshade(depth, cell, azimuth=315., altitude=45., z_factor=1.):
 
 
 def banded(depth, lo, hi, interval):
-    """Normaliza a profundidade em [0,1], quantizada em faixas de `interval` metros."""
+    """Normaliza a profundidade em [0,1], quantizada em faixas de `interval` metros alinhadas a múltiplos de `interval`."""
     depth = np.asarray(depth, dtype=float)
     span = max(float(hi) - float(lo), 1e-9)
-    offset = depth - lo
     if interval and interval > 0:
-        offset = np.floor(offset / interval + 1e-9) * interval
-    return np.clip(offset / span, 0, 1)
+        depth = np.floor(depth / interval + 1e-9) * interval  # bordas nas mesmas profundidades das isóbatas
+    return np.clip((depth - lo) / span, 0, 1)
 
 
 def compose(depth, lo, hi, palette, *, interval=None, shade=None, opacity=1.):
